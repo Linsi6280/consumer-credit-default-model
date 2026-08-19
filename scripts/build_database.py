@@ -18,6 +18,7 @@ files:
     reserved code, the servicer name as of that reporting period, and a
     sparsely-populated dollar amount. They are kept as-is but unused.
 """
+import re
 import sqlite3
 import csv
 import time
@@ -27,8 +28,15 @@ ROOT = Path(__file__).resolve().parent.parent
 RAW_DIR = ROOT / "data" / "raw"
 DB_PATH = ROOT / "data" / "freddie_mac_2006.db"
 
-ORIG_FILE = RAW_DIR / "sample_orig_2006.txt"
-PERF_FILE = RAW_DIR / "sample_perf_2006.txt"
+# Every vintage found in data/raw, e.g. {2006: (orig_path, perf_path), 2013: (...), ...}
+VINTAGES = {
+    int(m.group(1)): (
+        RAW_DIR / f"sample_orig_{m.group(1)}.txt",
+        RAW_DIR / f"sample_perf_{m.group(1)}.txt",
+    )
+    for f in RAW_DIR.glob("sample_orig_*.txt")
+    if (m := re.match(r"sample_orig_(\d{4})\.txt", f.name))
+}
 
 ORIGINATION_COLUMNS = [
     "credit_score",
@@ -104,6 +112,7 @@ PERFORMANCE_COLUMNS = [
 
 ORIGINATION_SCHEMA = f"""
 CREATE TABLE loan_origination (
+    vintage_year INTEGER,
     credit_score INTEGER,
     first_payment_date INTEGER,
     first_time_homebuyer_flag TEXT,
@@ -140,6 +149,7 @@ CREATE TABLE loan_origination (
 
 PERFORMANCE_SCHEMA = """
 CREATE TABLE loan_performance (
+    vintage_year INTEGER,
     loan_sequence_number TEXT,
     monthly_reporting_period INTEGER,
     current_actual_upb REAL,
@@ -216,22 +226,20 @@ def _coerce_row(row, columns, int_fields, float_fields):
     return out
 
 
-def load_origination(conn):
-    print(f"Loading origination file: {ORIG_FILE}")
+def load_origination(conn, vintage_year, orig_file):
+    print(f"Loading origination file: {orig_file}")
     cur = conn.cursor()
-    cur.execute("DROP TABLE IF EXISTS loan_origination;")
-    cur.execute(ORIGINATION_SCHEMA)
 
     insert_sql = (
-        f"INSERT INTO loan_origination ({', '.join(ORIGINATION_COLUMNS)}) "
-        f"VALUES ({', '.join('?' for _ in ORIGINATION_COLUMNS)})"
+        f"INSERT INTO loan_origination (vintage_year, {', '.join(ORIGINATION_COLUMNS)}) "
+        f"VALUES ({', '.join('?' for _ in range(len(ORIGINATION_COLUMNS) + 1))})"
     )
 
     batch, n = [], 0
-    with open(ORIG_FILE, newline="") as f:
+    with open(orig_file, newline="") as f:
         reader = csv.reader(f, delimiter="|")
         for row in reader:
-            batch.append(_coerce_row(row, ORIGINATION_COLUMNS, INT_FIELDS_ORIG, FLOAT_FIELDS_ORIG))
+            batch.append([vintage_year] + _coerce_row(row, ORIGINATION_COLUMNS, INT_FIELDS_ORIG, FLOAT_FIELDS_ORIG))
             if len(batch) >= 5000:
                 cur.executemany(insert_sql, batch)
                 n += len(batch)
@@ -243,23 +251,21 @@ def load_origination(conn):
     print(f"  Inserted {n:,} origination rows")
 
 
-def load_performance(conn):
-    print(f"Loading performance file: {PERF_FILE} (this takes a few minutes)")
+def load_performance(conn, vintage_year, perf_file):
+    print(f"Loading performance file: {perf_file} (this takes a few minutes)")
     cur = conn.cursor()
-    cur.execute("DROP TABLE IF EXISTS loan_performance;")
-    cur.execute(PERFORMANCE_SCHEMA)
 
     insert_sql = (
-        f"INSERT INTO loan_performance ({', '.join(PERFORMANCE_COLUMNS)}) "
-        f"VALUES ({', '.join('?' for _ in PERFORMANCE_COLUMNS)})"
+        f"INSERT INTO loan_performance (vintage_year, {', '.join(PERFORMANCE_COLUMNS)}) "
+        f"VALUES ({', '.join('?' for _ in range(len(PERFORMANCE_COLUMNS) + 1))})"
     )
 
     batch, n = [], 0
     t0 = time.time()
-    with open(PERF_FILE, newline="") as f:
+    with open(perf_file, newline="") as f:
         reader = csv.reader(f, delimiter="|")
         for row in reader:
-            batch.append(_coerce_row(row, PERFORMANCE_COLUMNS, INT_FIELDS_PERF, FLOAT_FIELDS_PERF))
+            batch.append([vintage_year] + _coerce_row(row, PERFORMANCE_COLUMNS, INT_FIELDS_PERF, FLOAT_FIELDS_PERF))
             if len(batch) >= 20000:
                 cur.executemany(insert_sql, batch)
                 n += len(batch)
@@ -291,8 +297,18 @@ def main():
     conn.execute("PRAGMA journal_mode = OFF;")
     conn.execute("PRAGMA synchronous = OFF;")
 
-    load_origination(conn)
-    load_performance(conn)
+    cur = conn.cursor()
+    cur.execute("DROP TABLE IF EXISTS loan_origination;")
+    cur.execute(ORIGINATION_SCHEMA)
+    cur.execute("DROP TABLE IF EXISTS loan_performance;")
+    cur.execute(PERFORMANCE_SCHEMA)
+    conn.commit()
+
+    for vintage_year, (orig_file, perf_file) in sorted(VINTAGES.items()):
+        print(f"\n=== Vintage {vintage_year} ===")
+        load_origination(conn, vintage_year, orig_file)
+        load_performance(conn, vintage_year, perf_file)
+
     build_indexes(conn)
 
     conn.close()
