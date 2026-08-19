@@ -26,7 +26,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 RAW_DIR = ROOT / "data" / "raw"
-DB_PATH = ROOT / "data" / "freddie_mac_2006.db"
+DB_PATH = ROOT / "data" / "freddie_mac.db"
 
 # Every vintage found in data/raw, e.g. {2006: (orig_path, perf_path), 2013: (...), ...}
 VINTAGES = {
