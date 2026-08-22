@@ -3,14 +3,17 @@ Load the Freddie Mac Single-Family Loan-Level Dataset (2006 sample vintage)
 into a local SQLite database.
 
 Field layout verified against Freddie Mac's Single-Family Loan-Level Dataset
-General User Guide (Jan 2026) and cross-checked against the actual sample
-files:
-  - Origination file: columns 1-25 match the official layout exactly.
-    Columns 26-31 (Super Conforming Flag ... Interest Only Indicator) are
-    constant/sentinel values for every loan in this 2006 vintage (HARP,
-    super-conforming, and post-2015 program flags did not exist yet), so
-    their exact legacy semantics don't affect modeling - they carry zero
-    variance and are kept only for completeness.
+General User Guide (Aug 2018) and cross-checked field-by-field against the
+actual sample files:
+  - Origination file: columns 1-24 (Credit Score ... Seller Name) match the
+    official documented layout exactly. There is no Servicer Name field in
+    the origination file (that only exists in the performance file) - column
+    25 is Super Conforming Flag directly. Columns 25-30 (Super Conforming
+    Flag ... Interest Only Indicator) are mostly constant/sentinel for the
+    older vintages here (HARP/relief-refinance and post-2015 program flags
+    barely applied), but not pure zero-variance - e.g. Super Conforming Flag
+    is Y for ~1.3% of the 2022 vintage. Column 31 (the last column) is
+    Vantage Score, a newer field not in the 2018 User Guide.
   - Performance file: columns 1-32 match the official layout exactly
     (confirmed field-by-field, including the ELTV=999 "unknown" sentinel
     for pre-2017 periods). Columns 33-35 are extra fields appended in this
@@ -63,13 +66,13 @@ ORIGINATION_COLUMNS = [
     "original_loan_term",
     "number_of_borrowers",
     "seller_name",
-    "servicer_name",
     "super_conforming_flag",
     "pre_relief_refinance_loan_sequence_number",
     "special_eligibility_program",
     "relief_refinance_indicator",
     "property_valuation_method",
     "interest_only_indicator",
+    "vantage_score",
 ]
 
 PERFORMANCE_COLUMNS = [
@@ -137,13 +140,13 @@ CREATE TABLE loan_origination (
     original_loan_term INTEGER,
     number_of_borrowers INTEGER,
     seller_name TEXT,
-    servicer_name TEXT,
     super_conforming_flag TEXT,
     pre_relief_refinance_loan_sequence_number TEXT,
     special_eligibility_program TEXT,
     relief_refinance_indicator TEXT,
     property_valuation_method TEXT,
-    interest_only_indicator TEXT
+    interest_only_indicator TEXT,
+    vantage_score INTEGER
 );
 """
 
@@ -192,7 +195,7 @@ CREATE TABLE loan_performance (
 INT_FIELDS_ORIG = {
     "credit_score", "first_payment_date", "maturity_date", "msa", "mi_pct",
     "number_of_units", "cltv", "dti", "original_upb", "ltv",
-    "original_loan_term", "number_of_borrowers",
+    "original_loan_term", "number_of_borrowers", "vantage_score",
 }
 FLOAT_FIELDS_ORIG = {"original_interest_rate"}
 
