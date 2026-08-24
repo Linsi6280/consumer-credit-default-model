@@ -108,3 +108,73 @@ up in the README. Not polished prose — just the substance, organized by theme.
   columns. Good interview material either way: shows the value of checking a claimed
   schema against the raw byte-level data instead of trusting a data dictionary (or a
   first-pass docstring) at face value.
+
+## Modeling (`scripts/model.py`)
+
+- **Modeling population**: 170,661 of 198,778 loans with a target — restricted to
+  `fully_observed_24m = 1`. Loans right-censored before month 24 (prepaid, or the
+  performance extract just ends early) are dropped rather than labeled "no default,"
+  since we genuinely don't know their outcome and mislabeling them would bias every
+  model toward "safe."
+- **Vintage-based split, not random**: train pool = 2007 + 2012 + 2016 (125,472 loans);
+  test = the entire 2022 vintage (45,189 loans), held out completely from fitting and
+  tuning. A random row-level split would put the same macro regime (rate environment,
+  underwriting standards) in both train and test, inflating every metric relative to
+  how the model would actually perform deployed against a genuinely new vintage — the
+  real use case for a PD model built today. LightGBM's early stopping uses a random 15%
+  carved out of the *train pool only* (never 2022), so tuning still never touches the
+  evaluation regime.
+- **Two macro-leakage features excluded on purpose**: `origination_year`/`quarter` (2022
+  is a category the model never sees in training — useless or misleading as a
+  predictor for the one vintage we care about), and `original_interest_rate` /
+  `vintage_avg_interest_rate` (absolute rate level is almost entirely a macro signal —
+  a 2012 loan at 3.5% vs. a 2022 loan at 6% reflects the Fed, not the borrower;
+  including it would let the model partially reconstruct "which vintage is this,"
+  defeating the point of the out-of-time test). `rate_spread_bps` — the borrower's rate
+  minus their own vintage's average — is kept instead since it's macro-normalized by
+  construction.
+- **Two design-matrix bugs caught by a singular-Hessian error, not by eyeballing
+  output**: (1) `pandas.get_dummies(..., dummy_na=True)` emits a `*_nan` indicator
+  column even when a column has zero actual NaNs — six such all-zero columns made the
+  logistic regression's design matrix exactly rank-deficient (`np.linalg.matrix_rank`
+  showed 35 vs. 41 columns). Fixed by only requesting `dummy_na` when
+  `series.isna().any()`. (2) `ltv_band` and `cltv_band` are near-duplicates of each
+  other — 91% of loans have `ltv == cltv` (no simultaneous second lien) — which was
+  severe enough multicollinearity to make the Hessian numerically singular even after
+  fixing (1). Resolved by dropping `ltv_band` and keeping `cltv_band` alone, since CLTV
+  is the more complete leverage measure (it folds in any second lien on top of the
+  first).
+- **Complete separation from rare zero-event categories**: `fico_band`/`cltv_band`'s
+  tiny "Not available" buckets (39 and 4 loans in the train pool) and
+  `first_time_homebuyer_flag`'s missing value (13 loans in the train pool) all have
+  *zero* defaults among them — statsmodels can't estimate a finite coefficient for a
+  category with no events (the MLE is literally -∞; showed up as a coefficient of -60
+  with a std error of 3×10¹³ before the fix). Folded into each variable's reference
+  category for the logistic regression only, since there's no way to estimate a
+  meaningful effect from that few rows anyway. `dti_band`'s "Not available" bucket
+  (19,225 loans, a real ~2% default rate) has plenty of both classes and is kept as its
+  own dummy.
+- **Results, held-out 2022 vintage**: logistic regression AUC 0.763 / KS 0.411;
+  LightGBM AUC 0.747 / KS 0.389. LightGBM fits the training pool much better (AUC 0.907
+  vs. 0.850) but generalizes slightly *worse* out-of-time — a clean, concrete
+  illustration of why flexible models need the out-of-time test more than linear ones:
+  the extra flexibility that helps in-sample is partly fitting vintage-specific noise in
+  2007/2012/2016 that doesn't transfer to 2022's rate-hiking regime. On rank-ordering
+  and decile capture the two models are close (both top decile captures 31–34% of all
+  defaults, top 3 deciles ~68%), so the interpretability of the logistic regression
+  isn't costing much predictive power here.
+- **Calibration drift on the 2022 vintage**: both models systematically over-predict
+  risk on 2022 (every decile point sits below the diagonal in `plots/calibration_plot.png`)
+  — a model trained on 2007/2012/2016 (average default rate ~2.6%, dragged up by 2007)
+  expects a riskier population than 2022 (2.12% observed) actually turned out to be.
+  Rank-ordering (AUC/KS/gains) survives the vintage shift far better than the absolute
+  probability scale does — a real-world reason a deployed PD model needs periodic
+  recalibration (e.g., a Platt/isotonic refit against recent originations) even when its
+  risk *ranking* is still sound.
+- **Odds ratios read as a clean credit scorecard** (reference = 780+ FICO, ≤60% CLTV,
+  ≤20% DTI, purchase, primary residence, not first-time buyer, all p<0.001 unless
+  noted): FICO <620 → 33.4x the reference borrower's odds of default, 620–639 → 21.7x,
+  monotonically down to 760–779 → 1.9x; CLTV >97% → 7.8x, monotonically down to 60–70%
+  → 1.7x; DTI >50% → 3.7x; cash-out refi → 2.2x vs. purchase. Property type and
+  occupancy status mostly don't clear significance once FICO/LTV/DTI are in the model —
+  the risk they'd otherwise proxy for is already captured directly.

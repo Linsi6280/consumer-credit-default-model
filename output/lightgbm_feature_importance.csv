@@ -1,0 +1,10 @@
+feature,split_gain
+rate_spread_bps,2039
+credit_score,1334
+dti,1233
+ltv,973
+cltv,910
+loan_purpose,417
+occupancy_status,154
+first_time_homebuyer_flag,71
+property_type,69
