@@ -24,6 +24,23 @@
 -- original_interest_rate across all loans originated in the same
 -- year/quarter cohort in this sample, and express each loan's rate spread
 -- relative to that cohort average, in basis points.
+--
+-- Additional day-one fields (number_of_units, number_of_borrowers, mi_pct,
+-- original_upb, channel): same sentinel-cleanup treatment as above -
+-- number_of_units/number_of_borrowers use 99 as "not available", mi_pct
+-- uses 999 (original_upb and channel have no sentinel in this extract).
+-- number_of_units_band collapses to 1 vs 2-4, matching the GSE LLPA
+-- convention (multifamily 2-4 unit properties are priced as one tier, not
+-- split by exact count). number_of_borrowers_band collapses to 1 vs 2+
+-- rather than keeping 3/4 as their own tiers, for a second reason beyond
+-- GSE convention: 3- and 4-borrower loans are present ONLY in the 2022 test
+-- vintage in this sample (zero in 2007/2012/2016) - keeping them separate
+-- would mean the logistic regression sees a category in test it never
+-- trained on, the exact same problem origination_year has (see
+-- scripts/model.py). mi_pct_band cutpoints follow the observed default-rate
+-- break points (see NOTES.md) rather than an official GSE grid, since GSE
+-- MI-coverage requirements vary by LTV tier rather than being fixed
+-- cutpoints. original_upb is left unbanded (see scripts/model.py for why).
 
 DROP TABLE IF EXISTS loan_features;
 
@@ -42,7 +59,12 @@ WITH cleaned AS (
         property_type,
         CASE WHEN first_time_homebuyer_flag IN ('Y', 'N') THEN first_time_homebuyer_flag ELSE NULL END
             AS first_time_homebuyer_flag,
-        original_interest_rate
+        original_interest_rate,
+        CASE WHEN number_of_units = 99 THEN NULL ELSE number_of_units END AS number_of_units,
+        CASE WHEN number_of_borrowers = 99 THEN NULL ELSE number_of_borrowers END AS number_of_borrowers,
+        CASE WHEN mi_pct = 999 THEN NULL ELSE mi_pct END AS mi_pct,
+        original_upb,
+        channel
     FROM loan_origination
 ),
 with_vintage_rate AS (
@@ -126,7 +148,40 @@ SELECT
     -- Rate and vintage spread
     original_interest_rate,
     ROUND(vintage_avg_interest_rate, 4) AS vintage_avg_interest_rate,
-    ROUND((original_interest_rate - vintage_avg_interest_rate) * 100, 1) AS rate_spread_bps
+    ROUND((original_interest_rate - vintage_avg_interest_rate) * 100, 1) AS rate_spread_bps,
+
+    -- Number of units (1-unit vs 2-4 unit multifamily, GSE pricing convention)
+    number_of_units,
+    CASE
+        WHEN number_of_units IS NULL THEN 'Not available'
+        WHEN number_of_units = 1 THEN '1'
+        ELSE '2-4'
+    END AS number_of_units_band,
+
+    -- Number of borrowers (1 vs 2+; see header note on why 3/4 aren't split out)
+    number_of_borrowers,
+    CASE
+        WHEN number_of_borrowers IS NULL THEN 'Not available'
+        WHEN number_of_borrowers = 1 THEN '1'
+        ELSE '2+'
+    END AS number_of_borrowers_band,
+
+    -- Mortgage insurance coverage % (0 = no MI, not missing)
+    mi_pct,
+    CASE
+        WHEN mi_pct IS NULL THEN 'Not available'
+        WHEN mi_pct = 0 THEN '0_none'
+        WHEN mi_pct <= 12 THEN '1-12'
+        WHEN mi_pct <= 25 THEN '13-25'
+        WHEN mi_pct <= 35 THEN '26-35'
+        ELSE '>35'
+    END AS mi_pct_band,
+
+    -- Original loan amount, left unbanded (continuous term - see scripts/model.py)
+    original_upb,
+
+    -- Origination channel: R = retail, C = correspondent, B = broker, T = TPO
+    channel
 
 FROM with_vintage_rate;
 

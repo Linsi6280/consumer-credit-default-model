@@ -153,6 +153,10 @@ LR_REFERENCE = {
     "occupancy_status": "P",        # primary residence
     "property_type": "SF",          # single family
     "first_time_homebuyer_flag": "N",
+    "number_of_units_band": "1",
+    "number_of_borrowers_band": "2+",   # empirically safer than solo (income diversification)
+    "mi_pct_band": "0_none",
+    "channel": "C",                     # correspondent - lowest observed default rate
 }
 
 
@@ -174,18 +178,23 @@ def one_hot(series, reference):
 # fico_band / cltv_band each have a tiny "Not available" bucket (39 and 4
 # loans respectively, out of 170,661 - the credit_score/cltv sentinel is
 # almost always populated), and first_time_homebuyer_flag is missing for
-# only 15 loans overall (13 in the train pool). All of these tiny buckets
-# have ZERO defaults among them. Left as their own dummies, statsmodels
-# can't estimate a finite coefficient for a category with no events at all
-# (complete separation - the MLE for that coefficient is -infinity, which
-# is exactly what showed up as an exploding coefficient/std error on
+# only 15 loans overall (13 in the train pool). mi_pct_band's "Not available"
+# bucket is smaller still (2 loans total). number_of_borrowers_band's "Not
+# available" bucket (23 loans, all in the 2007 train-pool vintage) also has
+# zero defaults, for the same reason. All of these tiny buckets have ZERO
+# defaults among them. Left as their own dummies, statsmodels can't estimate
+# a finite coefficient for a category with no events at all (complete
+# separation - the MLE for that coefficient is -infinity, which is exactly
+# what showed up as an exploding coefficient/std error on
 # first_time_homebuyer_flag_missing before this fix). Since there's no way
 # to estimate a meaningful effect from that few rows anyway, they're folded
 # into the reference (safest/most common) tier for the LR design matrix
 # only; dti_band's "Not available" bucket (19,225 loans, a real ~2%
-# prevalence) has plenty of both classes and is kept as its own dummy.
+# prevalence) and number_of_units_band's "Not available" bucket (52 loans,
+# 1 default in the train pool) both have enough events to keep as their own
+# dummy.
 lr_df = df.copy()
-for col in ["fico_band", "cltv_band"]:
+for col in ["fico_band", "cltv_band", "mi_pct_band", "number_of_borrowers_band"]:
     lr_df[col] = lr_df[col].replace("Not available", LR_REFERENCE[col])
 lr_df["first_time_homebuyer_flag"] = lr_df["first_time_homebuyer_flag"].fillna(
     LR_REFERENCE["first_time_homebuyer_flag"]
@@ -194,6 +203,18 @@ lr_df["first_time_homebuyer_flag"] = lr_df["first_time_homebuyer_flag"].fillna(
 lr_parts = [one_hot(lr_df[col], ref) for col, ref in LR_REFERENCE.items()]
 lr_parts.append((lr_df[["rate_spread_bps"]] / 100).rename(
     columns={"rate_spread_bps": "rate_spread_pctpt"}))
+# original_upb is left as a continuous term rather than banded like
+# FICO/LTV/CLTV/DTI: those bands mirror official GSE LLPA cutpoints, but
+# there's no equivalent official risk-tier grid for loan size, and the
+# empirical default rate by dollar band isn't cleanly monotonic (flat
+# ~2.4-2.6% from <=100k through 300-417k, only dropping at >417k) - loan
+# size looks more like a proxy for borrower affluence/exposure than a
+# clean risk axis, so forcing GSE-style bands onto it would be manufacturing
+# structure that isn't there. Log-transformed since original_upb is
+# right-skewed (10k-1.82M) - standard practice for a dollar-valued feature
+# in a linear model, same reasoning as scaling rate_spread_bps above.
+lr_parts.append(np.log(lr_df[["original_upb"]]).rename(
+    columns={"original_upb": "log_original_upb"}))
 X_lr_full = sm.add_constant(pd.concat(lr_parts, axis=1))
 
 X_lr_train = X_lr_full[is_train_pool].reset_index(drop=True).astype(float)
@@ -228,9 +249,10 @@ p_lr_test = logit_result.predict(X_lr_test)
 # regression requires. Missing values (the sentinel-cleaned NULLs from
 # sql/features.sql) are passed through as NaN; LightGBM routes them natively
 # instead of needing an imputed value.
-GBM_NUMERIC = ["credit_score", "ltv", "cltv", "dti", "rate_spread_bps"]
+GBM_NUMERIC = ["credit_score", "ltv", "cltv", "dti", "rate_spread_bps",
+               "number_of_units", "number_of_borrowers", "mi_pct", "original_upb"]
 GBM_CATEGORICAL = ["loan_purpose", "occupancy_status", "property_type",
-                    "first_time_homebuyer_flag"]
+                    "first_time_homebuyer_flag", "channel"]
 
 X_gbm_full = df[GBM_NUMERIC + GBM_CATEGORICAL].copy()
 for c in GBM_CATEGORICAL:
@@ -401,6 +423,8 @@ plt.close(fig)
 # %% --------------------------- Plot: calibration ----------------------------
 cal_lr = calibration_table(y_test, p_lr_test)
 cal_gbm = calibration_table(y_test, p_gbm_test)
+cal_lr.round(4).to_csv(OUTPUT_DIR / f"calibration_table_logit_{TEST_VINTAGE}.csv", index=False)
+cal_gbm.round(4).to_csv(OUTPUT_DIR / f"calibration_table_lightgbm_{TEST_VINTAGE}.csv", index=False)
 max_val = 100 * max(
     cal_lr[["mean_predicted", "mean_actual"]].values.max(),
     cal_gbm[["mean_predicted", "mean_actual"]].values.max(),
